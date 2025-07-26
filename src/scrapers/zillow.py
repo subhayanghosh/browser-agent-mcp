@@ -73,6 +73,45 @@ async def accept_cookies_or_modals(page):
         pass
 
 
+async def handle_listing_type_modal(page):
+    """Handle the 'For Sale' vs 'For Rent' modal that appears after search"""
+    try:
+        print("🔍 Checking for listing type modal...")
+
+        # Wait for the modal to appear
+        await page.wait_for_selector('text="What type of listings would you like to see?"', timeout=5000)
+        print("✅ Found listing type modal")
+
+        # Look for "For sale" button and click it
+        sale_selectors = [
+            'button:has-text("For sale")',
+            'button:has-text("For Sale")',
+            '[data-test="for-sale-button"]',
+            'a:has-text("For sale")',
+            'a:has-text("For Sale")'
+        ]
+
+        for selector in sale_selectors:
+            try:
+                await page.wait_for_selector(selector, timeout=2000)
+                await page.click(selector)
+                print(f"✅ Clicked 'For Sale' with selector: {selector}")
+                await human_delay(2, 3)
+                return True
+            except PlaywrightTimeoutError:
+                continue
+
+        print("❌ Could not find 'For Sale' button")
+        return False
+
+    except PlaywrightTimeoutError:
+        print("ℹ️  No listing type modal found")
+        return True
+    except Exception as e:
+        print(f"❌ Error handling listing type modal: {e}")
+        return False
+
+
 async def search_city(page, city):
     """Search for a city with improved selectors and retry logic"""
     max_retries = 3
@@ -138,112 +177,118 @@ async def search_city(page, city):
     return False
 
 
-async def scroll_and_collect(page, max_properties=20):
-    """Collect property data with improved selectors and error handling"""
-    results = []
-    seen_urls = set()
-    scrolls = 0
+async def collect_properties(page, max_properties=20):
+    """Collect property information from the search results"""
+    try:
+        print(f"📊 Collecting up to {max_properties} properties...")
 
-    print(f"📊 Collecting up to {max_properties} properties...")
+        # Wait for property cards to load
+        await human_delay(3, 5)
 
-    while len(results) < max_properties and scrolls < 20:
-        try:
-            # Wait for property cards with multiple selectors
-            card_selectors = [
-                'ul.photo-cards li article',
-                '[data-test="property-card"]',
-                '.property-card',
-                '[class*="property"]',
-                '[class*="listing"]',
-                'article[data-test*="property"]',
-                'li[data-test*="property"]'
-            ]
+        # Try multiple selectors for property cards
+        card_selectors = [
+            '[data-test="property-card"]',
+            '[data-test*="property"]',
+            '[class*="property-card"]',
+            '[class*="listing"]',
+            'article',
+            '[role="article"]',
+            'div[class*="card"]'
+        ]
 
-            cards_found = False
-            cards = []
-            for selector in card_selectors:
-                try:
-                    await page.wait_for_selector(selector, timeout=5000)
-                    cards = await page.query_selector_all(selector)
-                    if cards:
-                        cards_found = True
-                        print(
-                            f"✅ Found {len(cards)} cards with selector: {selector}")
-                        break
-                except PlaywrightTimeoutError:
-                    continue
+        cards = []
+        for selector in card_selectors:
+            try:
+                cards = await page.query_selector_all(selector)
+                if cards:
+                    print(
+                        f"✅ Found {len(cards)} cards with selector: {selector}")
+                    break
+            except:
+                continue
 
-            if not cards_found:
-                print("❌ No property cards found")
-                # Take a screenshot for debugging
-                screenshot = await page.screenshot()
-                with open(f"debug_no_cards_{scrolls}.png", "wb") as f:
-                    f.write(screenshot)
-                print(
-                    f"📸 Debug screenshot saved: debug_no_cards_{scrolls}.png")
-                break
-
-            # Process each card
-            for card in cards:
-                try:
-                    # Try to get URL
-                    url = await card.evaluate('el => el.querySelector("a")?.href || ""')
-                    if not url or url in seen_urls:
+        if not cards:
+            # Fallback: look for any elements that might be property cards
+            try:
+                all_elements = await page.query_selector_all('div, article')
+                cards = []
+                for element in all_elements:
+                    try:
+                        text = await element.evaluate('el => el.textContent || ""')
+                        if any(keyword in text.lower() for keyword in ['$', 'bds', 'ba', 'sqft', 'bed', 'bath']):
+                            cards.append(element)
+                    except:
                         continue
-                    seen_urls.add(url)
+                print(
+                    f"✅ Found {len(cards)} potential cards via text analysis")
+            except:
+                pass
 
-                    # Get property data with multiple selectors
-                    title = await card.evaluate('el => el.getAttribute("aria-label") || el.textContent || ""')
+        if not cards:
+            print("❌ No property cards found")
+            # Take debug screenshot
+            await page.screenshot(path="debug_no_cards_1.png")
+            return []
 
-                    # Try different price selectors
-                    price_selectors = [
-                        '[data-test="property-card-price"]',
-                        '[data-test*="price"]',
-                        '.price',
-                        '[class*="price"]'
-                    ]
-                    price = ""
-                    for price_selector in price_selectors:
-                        try:
-                            price = await card.evaluate(f'el => el.querySelector("{price_selector}")?.textContent || ""')
-                            if price.strip():
-                                break
-                        except:
-                            continue
+        results = []
+        cards_to_process = min(len(cards), max_properties)
 
-                    # Try different bed/bath selectors
-                    beds = await card.evaluate('el => el.querySelector("[data-test*=\"beds\"]")?.textContent || ""')
-                    baths = await card.evaluate('el => el.querySelector("[data-test*=\"baths\"]")?.textContent || ""')
-                    sqft = await card.evaluate('el => el.querySelector("[data-test*=\"sqft\"]")?.textContent || ""')
+        print(f"🔍 Processing {cards_to_process} property cards...")
 
+        for i, card in enumerate(cards[:cards_to_process]):
+            try:
+                # Extract property information
+                title = await card.evaluate('el => el.getAttribute("aria-label") ? el.getAttribute("aria-label") : (el.textContent ? el.textContent : "")')
+
+                # Extract data from title text using regex patterns
+                import re
+
+                # Extract price (look for $XXX,XXX pattern)
+                price_match = re.search(r'\$([0-9,]+)', title)
+                price = price_match.group(0) if price_match else ""
+
+                # Extract beds (look for "X bds" pattern)
+                beds_match = re.search(r'(\d+)\s*bds', title)
+                beds = beds_match.group(1) + " bds" if beds_match else ""
+
+                # Extract baths (look for "X ba" pattern)
+                baths_match = re.search(r'(\d+)\s*ba', title)
+                baths = baths_match.group(1) + " ba" if baths_match else ""
+
+                # Extract sqft (look for "X,XXX sqft" pattern)
+                sqft_match = re.search(r'([0-9,]+)\s*sqft', title)
+                sqft = sqft_match.group(1) + " sqft" if sqft_match else ""
+
+                # Clean up title (remove extra text after address)
+                title_clean = re.sub(
+                    r'(.*?)(?:COMPASS|SPROUT|COLDWELL|REALTY|LLC|\$[0-9,]+).*', r'\1', title)
+                title_clean = title_clean.strip()
+
+                # Get URL
+                url = await card.evaluate('el => el.querySelector("a") ? el.querySelector("a").href : ""')
+
+                # Only add if we have meaningful data
+                if title_clean and (price or beds or baths):
                     results.append({
-                        'title': title.strip() if title else '',
-                        'price': price.strip() if price else '',
+                        'title': title_clean,
+                        'price': price,
                         'url': url,
-                        'beds': beds.strip() if beds else '',
-                        'baths': baths.strip() if baths else '',
-                        'sqft': sqft.strip() if sqft else ''
+                        'beds': beds,
+                        'baths': baths,
+                        'sqft': sqft
                     })
+                    print(f"✅ Property {i+1}: {title_clean[:50]}...")
 
-                    print(f"📋 Property {len(results)}: {title[:50]}...")
+            except Exception as e:
+                print(f"❌ Error processing card {i+1}: {e}")
+                continue
 
-                    if len(results) >= max_properties:
-                        break
+        print(f"📊 Successfully collected {len(results)} properties")
+        return results
 
-                except Exception as e:
-                    print(f"❌ Error processing card: {e}")
-                    continue
-
-            # Scroll down to load more
-            await page.mouse.wheel(0, 800)
-            await human_delay(1.5, 2.5)
-            scrolls += 1
-
-        except Exception as e:
-            print(f"❌ Error in collection loop: {e}")
-            break
-
-    return results[:max_properties]
+    except Exception as e:
+        print(f"❌ Error collecting properties: {e}")
+        return []
 
 
 async def main():
@@ -300,13 +345,23 @@ async def main():
         # Check for additional challenges after search
         await handle_challenges_with_ai(page, ai_solver)
 
+        # Handle "For Sale" vs "For Rent" modal
+        await handle_listing_type_modal(page)
+
         # Wait for search results to load
         print("⏳ Waiting for search results to load...")
         await human_delay(5, 8)
 
+        # Check for challenges again after waiting
+        print("🔍 Checking for post-search challenges...")
+        await handle_challenges_with_ai(page, ai_solver)
+
+        # Final wait for page to stabilize
+        await human_delay(3, 5)
+
         # Get max properties from environment
         max_properties = int(os.getenv('ZILLOW_MAX_PROPERTIES', '20'))
-        properties = await scroll_and_collect(page, max_properties)
+        properties = await collect_properties(page, max_properties)
         with open(OUTPUT_FILE, 'w') as f:
             json.dump(properties, f, indent=2)
         print(f"[+] Saved {len(properties)} properties to {OUTPUT_FILE}")

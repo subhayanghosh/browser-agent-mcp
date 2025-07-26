@@ -9,6 +9,7 @@ import re
 import base64
 import io
 import os
+import random
 from datetime import datetime
 from src.utils.stealth import StealthUtils
 
@@ -240,8 +241,20 @@ class AIChallengeSolver:
                 if success:
                     print(
                         f"[AI] Challenge solved successfully on attempt {self.attempt_count}")
-                    return True
-                else:
+
+                    # Verify the challenge was actually solved
+                    await asyncio.sleep(2)  # Wait for page to update
+                    verification_result = await self.verify_challenge_solved(page)
+
+                    if verification_result:
+                        print("[AI] Challenge verification successful")
+                        return True
+                    else:
+                        print(
+                            "[AI] Challenge verification failed - challenge still present")
+                        success = False
+
+                if not success:
                     print(
                         f"[AI] Attempt {self.attempt_count} failed, retrying...")
                     await asyncio.sleep(2)  # Wait before retry
@@ -253,109 +266,238 @@ class AIChallengeSolver:
         print(f"[AI] All {self.max_attempts} attempts failed")
         return False
 
-    async def handle_press_hold(self, page: Page):
-        """Handle press and hold challenges"""
+    async def verify_challenge_solved(self, page: Page):
+        """Verify that the challenge has been successfully solved"""
         try:
-            elements = await self.find_interactive_elements(page, 'press_hold')
+            # Wait a moment for the page to update
+            await asyncio.sleep(2)
 
-            if elements:
-                element_info = elements[0]
-                element = element_info['element']
+            # Check if the challenge modal is still present (more comprehensive check)
+            challenge_indicators = [
+                'text="Before we continue..."',
+                'text="Press & Hold to confirm"',
+                'button:has-text("Press & Hold")',
+                'p:has-text("Press & Hold")',
+                'div:has-text("Press & Hold")',
+                '[class*="scOJKUAdFmeUmFj"]',
+                '#ZLAyyssWZRaLUoC',
+                'iframe[id="px-captcha-modal"]'
+            ]
 
-                print(
-                    f"[AI] Executing press & hold on {element_info['selector']}")
-
-                # Try multiple approaches for press & hold
-
-                # Approach 1: Direct element interaction
+            for indicator in challenge_indicators:
                 try:
-                    await element.press("MouseDown")
-                    await asyncio.sleep(3)  # Hold for 3 seconds
-                    await element.press("MouseUp")
-                    print("[AI] Press & hold completed (approach 1)")
-                    return True
-                except Exception as e1:
-                    print(f"[AI] Approach 1 failed: {e1}")
+                    element = await page.query_selector(indicator)
+                    if element:
+                        print(f"[AI] Challenge still present: {indicator}")
+                        return False
+                except:
+                    continue
 
-                # Approach 2: Human-like mouse interaction with stealth
-                try:
-                    success = await StealthUtils.human_like_press_hold(page, element, 3.0)
-                    if success:
-                        print("[AI] Press & hold completed (approach 2 - stealth)")
-                        return True
-                except Exception as e2:
-                    print(f"[AI] Approach 2 failed: {e2}")
+            # Check if search input is now available and interactive (indicates challenge is solved)
+            search_selectors = [
+                'input[aria-label="Enter an address, neighborhood, city, or ZIP code"]',
+                'input[placeholder*="address"]',
+                'input[placeholder*="city"]',
+                'input[type="text"]'
+            ]
 
-                # Approach 3: Click and hold with JavaScript
+            for selector in search_selectors:
                 try:
-                    await page.evaluate("""
-                        (element) => {
-                            const mouseDownEvent = new MouseEvent('mousedown', {
-                                bubbles: true,
-                                cancelable: true,
-                                view: window
-                            });
-                            element.dispatchEvent(mouseDownEvent);
-                            
-                            setTimeout(() => {
-                                const mouseUpEvent = new MouseEvent('mouseup', {
-                                    bubbles: true,
-                                    cancelable: true,
-                                    view: window
-                                });
-                                element.dispatchEvent(mouseUpEvent);
-                            }, 3000);
-                        }
-                    """, element)
-                    await asyncio.sleep(3.5)  # Wait for the JavaScript to complete
-                    print("[AI] Press & hold completed (approach 3)")
-                    return True
-                except Exception as e3:
-                    print(f"[AI] Approach 3 failed: {e3}")
-
-                # Approach 4: Try clicking the element directly
-                try:
-                    await element.click()
-                    print("[AI] Press & hold completed (approach 4 - direct click)")
-                    return True
-                except Exception as e4:
-                    print(f"[AI] Approach 4 failed: {e4}")
-
-                # Approach 5: Try clicking by coordinates
-                try:
-                    box = await element.bounding_box()
-                    if box:
-                        center_x = box['x'] + box['width'] / 2
-                        center_y = box['y'] + box['height'] / 2
-                        await page.mouse.click(center_x, center_y)
+                    element = await page.query_selector(selector)
+                    if element:
                         print(
-                            "[AI] Press & hold completed (approach 5 - coordinate click)")
+                            f"[AI] Search input found with selector: {selector}")
                         return True
-                except Exception as e5:
-                    print(f"[AI] Approach 5 failed: {e5}")
+                except:
+                    continue
 
-                # Approach 6: Try clicking anywhere on the page that looks like a button
+            print("[AI] No search input found - challenge may not be solved")
+            return False
+
+        except Exception as e:
+            print(f"[AI] Error in challenge verification: {e}")
+            return False
+
+    async def remove_interfering_elements(self, page: Page):
+        """Remove or disable interfering elements like iframes"""
+        try:
+            await page.evaluate("""
+                () => {
+                    // Remove interfering iframes
+                    const iframes = document.querySelectorAll('iframe[id*="captcha"], iframe[id*="modal"], iframe[class*="captcha"]');
+                    iframes.forEach(iframe => {
+                        iframe.style.display = 'none';
+                        iframe.style.visibility = 'hidden';
+                        iframe.style.pointerEvents = 'none';
+                        iframe.style.zIndex = '-1';
+                    });
+                    
+                    // Remove any overlay elements that might block interaction
+                    const overlays = document.querySelectorAll('div[class*="overlay"], div[class*="modal"], div[style*="position: fixed"]');
+                    overlays.forEach(overlay => {
+                        if (overlay.style.zIndex > 1000) {
+                            overlay.style.pointerEvents = 'none';
+                        }
+                    });
+                }
+            """)
+            print("[AI] Removed interfering elements")
+        except Exception as e:
+            print(f"[AI] Error removing interfering elements: {e}")
+
+    async def find_press_hold_button(self, page: Page):
+        """Find the press & hold button using multiple strategies"""
+        try:
+            # Strategy 1: Look for specific selectors with better text matching
+            selectors = [
+                'button:has-text("Press & Hold")',
+                'div:has-text("Press & Hold")',
+                'p:has-text("Press & Hold")',
+                'span:has-text("Press & Hold")',
+                '[tabindex]',
+                '#ZLAyyssWZRaLUoC',
+                '.scOJKUAdFmeUmFj',
+                '[class*="press"]',
+                '[class*="hold"]',
+                '[class*="button"]'
+            ]
+
+            for selector in selectors:
                 try:
-                    # Look for any clickable element with "Press" text
-                    all_elements = await page.query_selector_all('*')
-                    # Limit to first 20 elements
-                    for elem in all_elements[:20]:
+                    elements = await page.query_selector_all(selector)
+                    for element in elements:
                         try:
-                            text = await elem.evaluate('el => el.textContent || ""')
+                            text = await element.evaluate('el => el.textContent || ""')
                             if 'press' in text.lower() and 'hold' in text.lower():
-                                await elem.click()
                                 print(
-                                    "[AI] Press & hold completed (approach 6 - text search)")
-                                return True
+                                    f"[AI] Found button with selector: {selector}")
+                                return element
                         except:
                             continue
-                except Exception as e6:
-                    print(f"[AI] Approach 6 failed: {e6}")
+                except:
+                    continue
+
+            # Strategy 2: JavaScript search with more comprehensive approach
+            button = await page.evaluate_handle("""
+                () => {
+                    // Look for any element with "Press & Hold" text
+                    const elements = document.querySelectorAll('*');
+                    for (const el of elements) {
+                        if (el.textContent && el.textContent.toLowerCase().includes('press') && el.textContent.toLowerCase().includes('hold')) {
+                            return el;
+                        }
+                    }
+                    
+                    // Look for elements with specific classes or IDs
+                    const specificSelectors = [
+                        '[tabindex]',
+                        '[class*="press"]',
+                        '[class*="hold"]',
+                        '[class*="button"]',
+                        '[id*="press"]',
+                        '[id*="hold"]'
+                    ];
+                    
+                    for (const selector of specificSelectors) {
+                        try {
+                            const els = document.querySelectorAll(selector);
+                            for (const el of els) {
+                                if (el.textContent && el.textContent.toLowerCase().includes('press')) {
+                                    return el;
+                                }
+                            }
+                        } catch (e) {
+                            continue;
+                        }
+                    }
+                    
+                    return null;
+                }
+            """)
+
+            if button and await button.evaluate('el => el !== null'):
+                print("[AI] Found button via JavaScript search")
+                return button
+
+            # Strategy 3: Look for any clickable element in the modal
+            try:
+                modal_elements = await page.query_selector_all('[role="button"], button, [tabindex], [class*="btn"]')
+                for element in modal_elements:
+                    try:
+                        text = await element.evaluate('el => el.textContent || ""')
+                        if text.strip() and ('press' in text.lower() or 'hold' in text.lower()):
+                            print(f"[AI] Found button in modal: {text}")
+                            return element
+                    except:
+                        continue
+            except:
+                pass
+
+            print("[AI] Could not find press & hold button with any strategy")
+            return None
+
+        except Exception as e:
+            print(f"[AI] Error finding press & hold button: {e}")
+            return None
+
+    async def execute_simple_press_hold(self, page: Page, button):
+        """Simulate a long press using element.hover() and mouse events (StackOverflow approach)"""
+        try:
+            print(f"[AI] Using StackOverflow approach: hover + mouse down/up")
+
+            # Get the actual button position
+            box = await button.bounding_box()
+            if not box:
+                print("[AI] Could not get button position")
+                return False
+
+            center_x = box['x'] + box['width'] / 2
+            center_y = box['y'] + box['height'] / 2
+
+            print(f"[AI] Button position: ({center_x}, {center_y})")
+
+            # Step 1: Hover over the button (crucial for modals/overlays)
+            await button.hover()
+            await asyncio.sleep(random.uniform(0.2, 0.5))
+            print("[AI] Hovered over button")
+
+            # Step 2: Mouse down (start hold) with actual button coordinates
+            await page.mouse.click(button='left', delay=10000, x=center_x, y=center_y)
+            print("[AI] Mouse down - hold completed")
+
+            return True
+
+        except Exception as e:
+            print(f"[AI] Error in StackOverflow press & hold: {e}")
+            return False
+
+    async def handle_press_hold(self, page: Page):
+        """Handle press and hold challenges - simplified approach"""
+        try:
+            print("[AI] Starting simplified press & hold approach...")
+
+            # Step 1: Remove any interfering iframes
+            await self.remove_interfering_elements(page)
+
+            # Step 2: Find the press & hold button using multiple strategies
+            button = await self.find_press_hold_button(page)
+
+            if not button:
+                print("[AI] Could not find press & hold button")
+                return False
+
+            # Step 3: Execute the press & hold with a simple, reliable method
+            success = await self.execute_simple_press_hold(page, button)
+
+            if success:
+                # Step 4: Wait and verify
+                await asyncio.sleep(3)
+                return await self.verify_challenge_solved(page)
 
             return False
 
         except Exception as e:
-            print(f"[AI] Error in press & hold: {e}")
+            print(f"[AI] Error in simplified press & hold: {e}")
             return False
 
     async def handle_checkbox(self, page: Page):
@@ -403,6 +545,48 @@ class AIChallengeSolver:
         except Exception as e:
             print(f"[AI] Error in slider handling: {e}")
             return False
+
+    async def handle_iframe_interference(self, page: Page):
+        """Handle iframe interference that blocks pointer events"""
+        try:
+            # Check for interfering iframes
+            iframe_selectors = [
+                'iframe[id="px-captcha-modal"]',
+                'iframe[class*="captcha"]',
+                'iframe[class*="modal"]',
+                'iframe[src*="captcha"]',
+                'iframe[src*="challenge"]'
+            ]
+
+            for iframe_selector in iframe_selectors:
+                try:
+                    iframe = await page.query_selector(iframe_selector)
+                    if iframe:
+                        print(
+                            f"[AI] Found interfering iframe: {iframe_selector}")
+
+                        # Try to remove the iframe
+                        await page.evaluate("""
+                            (iframeSelector) => {
+                                const iframe = document.querySelector(iframeSelector);
+                                if (iframe) {
+                                    iframe.style.display = 'none';
+                                    iframe.style.visibility = 'hidden';
+                                    iframe.style.pointerEvents = 'none';
+                                    iframe.style.zIndex = '-1';
+                                }
+                            }
+                        """, iframe_selector)
+
+                        print(f"[AI] Disabled iframe: {iframe_selector}")
+                        await asyncio.sleep(1)
+
+                except Exception as e:
+                    print(f"[AI] Error handling iframe {iframe_selector}: {e}")
+                    continue
+
+        except Exception as e:
+            print(f"[AI] Error in iframe interference handling: {e}")
 
     async def handle_cookie_consent(self, page: Page):
         """Handle cookie consent dialogs"""
